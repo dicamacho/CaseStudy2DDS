@@ -1,0 +1,376 @@
+---
+title: "CaseStudy02"
+author: "David"
+date: "2023-08-09"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+Link For YouTube Video: https://youtu.be/xgMDbEJLvAI
+
+Initial Setup and Obtaining of the data.
+```{r}
+
+# Loading Data From S3 Objects Using the aws.s3 package
+#install.packages("magrittr")
+library(tidyverse)
+library(aws.s3)
+
+
+#Key to Access AWS
+Sys.setenv("AWS_ACCESS_KEY_ID" = "AKIA24NJSHXQZNNQCJPX",
+           "AWS_SECRET_ACCESS_KEY" = "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",
+           "AWS_DEFAULT_REGION" = "us-east-2")
+
+# Using aws.s3 to obtain the files within a buck
+aws.s3::bucketlist()
+aws.s3::get_bucket("ddsproject1")
+
+
+# Read in CaseStudy2-data.csv
+case = s3read_using(FUN = read.csv,
+                    bucket = "ddsproject1",
+                    object = "CaseStudy2-data.csv")
+
+# Reading in the competition set for later use
+caseComp = s3read_using(FUN = read.csv,
+                    bucket = "ddsproject1",
+                    object = "CaseStudy2CompSet No Attrition.csv")
+
+# Adding a column for Attrition as a continuous variable. May or may not be useful down
+# the road
+case <- mutate(case, Attrition_Fac = ifelse(case$Attrition == "No", 0, 1))
+
+
+# Adding a column for OverTime as a continuous variable. May or may not be useful down
+#the road
+case <- mutate(case, OverTimeCont = ifelse(case$OverTime == "No", 0, 1))
+
+# OverTimeCont as Int instead of just number
+case$OverTimeCont <- as.integer(case$OverTimeCont)
+
+```
+
+Getting counts of Attrition: Yes v No and a summary
+```{r}
+
+case %>%
+  ggplot(aes(x = Attrition, fill = Attrition)) + 
+  geom_bar() +
+  ggtitle("Attrition: Yes v No") +
+  geom_text(stat='count', aes(label=..count..), vjust= -.35)
+
+
+str(case)
+
+```
+
+
+Conducting an EDA and creating a scatter plot of the top contributing factors. Initial EDA was done in the Shiny App which allows the user to choose different x and y continuous variables. The app receives the variables and dynamically creates a scatter plot and smoothing line to show correlation. The shiny app significantly facilitated the EDA process. Below I draw a scatter plot of what looks to contain the top contributing factors for attrition.
+
+My Shiny App can be found at: https://dicamacho.shinyapps.io/Attrition/
+
+My logic for Age v NumCompaniesWorked is that if a young person has worked at multiple companies, they are more likely to turnover.
+My logic for YearsInCurrentRole v YearsSinceLastPromotion is that if a person has been in a role for quite a long time with little to no promotion, they are more likely to turnover
+```{r}
+
+# Looking for correlations among continuous variables that may show a strong
+# relationship for attrition
+
+# Scatter plot of Age v NumCompaniesWorked
+#
+case %>%
+  ggplot(aes(x = Age, y = NumCompaniesWorked, color = Attrition)) +
+  geom_point() +
+  geom_smooth() +
+  geom_jitter() +
+  ggtitle("LR Model: Age v NumCompaniesWorked")
+
+
+
+case %>%
+  ggplot(aes(x = YearsInCurrentRole, y = YearsSinceLastPromotion, color = Attrition)) +
+  geom_point() +
+  geom_smooth(method = "lm") +
+  geom_jitter() +
+  ggtitle("LR Model: YearsInCurrentRole v YearSinceLastPromotion")
+
+
+
+```
+
+
+Using KNN to Predict Attrition (Age~NumCompaniesWorked). 
+The intent here is to obtain the most optimal k. I ran a for loop to store the mean accuracy for each iteration and used the max accuracy to determine the optimal k. 
+Optimal Ks = 11 at .82 accuracy
+```{r}
+
+#install.packages("caret")
+library(caret)
+library(class)
+
+set.seed(1)
+iterations = 10
+numks = 100
+splitPerc = .8
+
+masterAcc = matrix(nrow = iterations, ncol = numks)
+
+for(j in 1:iterations)
+{
+  trainIndices = sample(1:dim(case)[1],round(splitPerc * dim(case)[1]))
+  train = case[trainIndices,]
+  test = case[-trainIndices,]
+  for(i in 1:numks)
+  {
+    classifications = knn(train[,c(2,22)],test[,c(2,22)],train$Attrition, prob = TRUE, k = i)
+    table(classifications,test$Attrition)
+    CM = confusionMatrix(table(classifications,test$Attrition))
+    masterAcc[j,i] = CM$overall[1]
+  }
+  
+}
+
+MeanAcc = colMeans(masterAcc)
+
+plot(seq(1,numks,1),MeanAcc, type = "l")
+
+which.max(MeanAcc)
+max(MeanAcc)
+
+```
+
+Now it's time to run my test set against my training set at the optimal k =  11.
+Then I'll pull the sensitivity and specificity calling the ConfusingMatrix()
+Accuracy of 83%
+Sensitivity: 98%
+Specificity: 6% (Terrible)
+While my Sensitivity is favorable (> 60%), my specificity is significantly low. Or at least lower than we'd like it to be. It's definitely nowhere near 60%
+```{r}
+
+# 
+trainIndices = sample(1:dim(case)[1],round(splitPerc * dim(case)[1]))
+train = case[trainIndices,]
+test = case[-trainIndices,]
+
+classificationsK8 = knn(train[,c(2,22)],test[,c(2,22)],train$Attrition, prob = TRUE, k = 11)
+confusionMatrix(table(classificationsK8, test$Attrition))
+
+#
+
+```
+Because my specificity was very low, I can either: choose other variables, change the threshold, over-sample or under-sample
+I chose to adjust the threshold first. Fortunately, this was enough for me to obtain a favorable sensitivity and specificity (Both > 60%)
+I took my overall data set of 870 observations and ran it against itself. My sensitivty remained high while my specificity was low.
+I changed the probabilities to show me the probability of Attrition = "Yes". 
+Next, I decided on a threshold of 16%. My logic for this was 140 observations of "Yes" / 870 total observations
+If my probability was greater than .16% I changed my value to "Yes", else "No".
+Finally, I reran my original KNN against the competition set, changed the probabilities of my competition set to show the probabilities of "Yes", then changed my values to "Yes" if said probabilities were > 16%
+Then, I export my output via write.csv
+```{r}
+library(pROC)
+classificationsK8
+
+attributes(classificationsK8)
+attributes(classificationsK8)$prob
+
+#Trying on the whole data set
+classificationsAll = knn(case[,c(2,22)],case[,c(2,22)],case$Attrition, prob = TRUE, k = 11)
+confusionMatrix(table(classificationsAll, case$Attrition))
+
+
+#Get probs of a Yes specifically
+probs = ifelse(classificationsAll == "Yes",attributes(classificationsAll)$prob, 1- attributes(classificationsAll)$prob)
+probs
+
+#New Threshold
+summary(case$Attrition)
+140/(870) #16% FRAUD
+
+NewClass = ifelse(probs > .1609195, "Yes", "No")
+table(NewClass, case[,"Attrition"])
+CM = confusionMatrix(table(NewClass,case[,"Attrition"]), mode = "everything")
+CM
+# With New Threshold of probs of Attrition = "Yes" > .1609195, I get Sensitivity = .6329 and Specificity = .6786
+
+#Now let's run it with the competition set.
+classificationsComp <- knn(train[, c(2, 22)], caseComp[, c("Age", "NumCompaniesWorked")], train$Attrition, prob = TRUE, k = 11)
+
+
+#Looking at the predictor and its probability ie: "Yes" .2
+classificationsComp
+attributes(classificationsComp)
+attributes(classificationsComp)$prob
+
+#Give me the probabilities of "Yes"
+probsComp = ifelse(classificationsComp == "Yes",attributes(classificationsComp)$prob, 1- attributes(classificationsComp)$prob)
+probsComp
+
+#If probability (of "Yes") > .1609195, then "Yes", else "No"
+#These are now your new values for the competition set
+NewCompClass = ifelse(probsComp > .1609195, "Yes", "No")
+
+
+#Export file
+write.csv(NewCompClass, file = "C:/Users/camac/OneDrive/Desktop/Case2PredictionsCamacho Attrition Revised.csv", row.names = FALSE)
+
+NewCompClass
+summary(NewCompClass)
+
+
+```
+
+
+I actually used Naive Bayes to Predict Attrition before adjusting my threshold in the KNN model. Just one Iteration to get started. I used the same variables of Age v NumCompaniesWorked
+My sensitivity was high and my specificity was very low. Sometimes even NA
+```{r}
+library(e1071)
+set.seed(4)
+model = naiveBayes(train[,c("Age","NumCompaniesWorked")],train$Attrition)
+CMNaive = confusionMatrix(table(test$Attrition,predict(model,test[,c("Age","NumCompaniesWorked")])))
+CMNaive
+
+
+
+```
+
+Here, I attempted to get the mean accuracy, sensitivity, and specificity by running through 100 iterations of seeds.
+Using Naive Bayes to Predict Attrition and get mean stats (Age ~ NumCompaniesWorked)
+Unfortunately, my metrics were similar. High sensitivity, low specificity
+Mean Accuracy: 84%
+Mean sensitivity: 84%
+Mean Specificity: NA
+```{r}
+AccHolder = numeric(100)
+SensHolder = numeric(100)
+SpecHolder = numeric(100)
+
+for (seed in 1:100)
+{
+set.seed(seed)
+
+model = naiveBayes(train[,c(2,22)],train$Attrition)
+CMNaive = confusionMatrix(table(test$Attrition,predict(model,test[,c(2,22)])))
+AccHolder[seed] = CMNaive$overall[1]
+SensHolder[seed] = CMNaive$byClass[1]
+SpecHolder[seed] = CMNaive$byClass[2]
+}
+
+mean(AccHolder)
+#Standard Error of the Mean
+sd(AccHolder)/sqrt(100) 
+mean(SensHolder)
+#Standard Error of the Mean
+sd(SensHolder)/sqrt(100) 
+mean(SpecHolder)
+#Standard Error of the Mean
+sd(SensHolder)/sqrt(100)
+
+
+```
+I attemtped to add a third variable into the mix to see if I could raise my metrics. Unfortunately, that didn't work either.
+Using Naive Bayes to Predict Attrition with three variables and get mean stats (Age ~ NumCompaniesWorked ~ ClassLevel)
+Mean Accuracy: 84%
+Mean Sensitivity: 84%
+Mean Specificity: NA
+At the end, I adjusted my threshold (> .16) for KNN as seen above and that provided favorable metrics on both sensitivity and specificity (> 60%)
+```{r}
+AccHolder = numeric(100)
+SensHolder = numeric(100)
+SpecHolder = numeric(100)
+
+for (seed in 1:100)
+{
+set.seed(seed)
+trainIndices = sample(1:dim(case)[1],round(splitPerc * dim(case)[1]))
+train = case[trainIndices,]
+test = case[-trainIndices,]
+model = naiveBayes(train[,c("Age","NumCompaniesWorked","JobSatisfaction")], train$Attrition)
+CMNaive = confusionMatrix(table(factor(test$Attrition),predict(model,test[,c("Age","NumCompaniesWorked","JobSatisfaction")])))
+AccHolder[seed] = CMNaive$overall[1]
+SensHolder[seed] = CMNaive$byClass[1]
+SpecHolder[seed] = CMNaive$byClass[2]
+}
+
+mean(AccHolder)
+#Standard Error of the Mean
+sd(AccHolder)/sqrt(100) 
+mean(SensHolder)
+#Standard Error of the Mean
+sd(SensHolder)/sqrt(100) 
+mean(SpecHolder)
+#Standard Error of the Mean
+sd(SensHolder)/sqrt(100)
+CMNaive
+```
+
+Now it's time to predict the MonthlyIncome
+Using Linear Regression to Predict MonthlyIncome
+I decide to draw a linear regression model with a scatter plot
+My most obvious choice was MonthlyIncome~JobLevel and sure enough, it seems there was a linear relationship.
+I perform linear regression to get the p values and confidence intervals.
+My equation for determing MonthlyIncome was MonthlyIncome = 4013.671 x - 1793.934
+```{r}
+
+# Plot
+case %>%
+  ggplot(aes(x = JobLevel, y = MonthlyIncome)) +
+  geom_point() +
+  geom_smooth(method = "lm") +
+  geom_jitter() +
+  ggtitle("LR Model: JobLevel vs MPG")
+
+
+# Perform linear regression
+model <- lm(MonthlyIncome ~ JobLevel, data = na.omit(case))
+
+# Extract p-value and confidence intervals
+summary(model)
+confint(model)
+
+# Extract coefficients Manually
+coefficients <- coef(model)
+slope <- coefficients[2]
+intercept <- coefficients[1]
+
+# Print results
+cat("Slope:", slope, "\n")
+cat("MonthlyIncome = ", slope, "x +", intercept, "\n") # MonthlyIncome = 4013.671 x - 1793.934
+
+```
+
+
+Then, I ran a loop for the data set to obtain the pred_error_sq and eventually obtain the RMSE
+Calculating RMSE
+RMSE = 1414.96
+Conclusion: RMSE < 3000
+The RMSE was a favorable one at 1414.96. (Below the proposed $3000)
+Outside of this file, I took the No Salary csv, added a new column and pasted this formula to obtain the MonthlyIncome for each JobLevel in that data set = 4013.671 (JobLevel) - 1793.934
+```{r}
+
+# Model 1
+pred_error_sq <- c(0)
+for(i in 1:dim(case)[1]) {
+ case_linear_train <- case[-i,]
+  fit <- lm(MonthlyIncome ~ JobLevel,data = case_linear_train) # leave i'th observation out
+  MonthlyIncome_i <- predict(fit, data.frame(JobLevel = case[i,16])) # predict i'th observation
+  pred_error_sq <- pred_error_sq + (case[i,20] - MonthlyIncome_i)^2 # cumulate squared prediction errors
+}
+
+SSE = var(case$MonthlyIncome) * (869)
+
+R_squared <- 1 - (pred_error_sq/SSE) # Measure for goodness of fit
+R_squared
+
+MSE = pred_error_sq / 870 
+MSE
+
+RMSE = sqrt(pred_error_sq/870)
+RMSE
+
+
+```
